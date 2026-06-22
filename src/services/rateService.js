@@ -211,10 +211,10 @@ export async function getRatesForShopify(shopifyReq, shopDomain = "") {
   const normalized = normalizeRates(raw, methods);
   const rates = normalized.map(toShopifyRate);
 
-  // Surface backend HTTP errors so they show up clearly in logs / /diagnose.
+  // Surface why we returned no rates so logs and /diagnose are actionable.
   let note;
   if (raw && raw.__httpError) {
-    note = `backend HTTP ${raw.__httpError}`;
+    note = `backend HTTP ${raw.__httpError}` + (raw.error ? ` — ${raw.error}` : "");
   } else if (!normalized.length) {
     note = "backend response had no usable rates (check shape and prices > 0)";
   }

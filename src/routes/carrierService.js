@@ -1,38 +1,31 @@
 import { Router } from "express";
 import { verifyShopifyHmac, checkDomain } from "../middleware/auth.js";
 import { getRatesForShopify } from "../services/rateService.js";
+import nicnat from "../lib/nicnatClient.js";
+import config from "../lib/config.js";
 
 const router = Router();
 
-/**
- * Tiny structured logger. Always logs — even in production — so you can see
- * exactly what Shopify sent, what we sent to the backend, and what came back.
- * View logs on Railway: Deployments → View Logs (or `railway logs`).
- */
 function log(stage, obj) {
-  try {
-    console.log(`[carrier-service][${stage}] ${JSON.stringify(obj)}`);
-  } catch {
-    console.log(`[carrier-service][${stage}]`, obj);
-  }
+  try { console.log(`[carrier-service][${stage}] ${JSON.stringify(obj)}`); }
+  catch { console.log(`[carrier-service][${stage}]`, obj); }
 }
 
 /**
  * Shopify CarrierService callback.
- * Body: { rate: { origin, destination, items, currency, locale } }
+ * Body:     { rate: { origin, destination, items, currency, locale } }
  * Response: { rates: [ { service_name, service_code, total_price (cents string), currency } ] }
  *
- * Returning `{rates: []}` is valid; Shopify just shows no Nicnat option and
- * falls back to whatever manual rates the store has configured (that's where
- * the mysterious "Free" rows come from).
+ * Returning `{rates: []}` is valid. When it happens, Shopify falls back to
+ * the store's manually-configured rates (this is where "Free" rows come from
+ * — they're in Shopify Admin → Settings → Shipping and delivery, NOT this app).
  */
 router.post("/carrier-service", verifyShopifyHmac, checkDomain, async (req, res) => {
   const shopDomain = req.shopDomain || req.get("X-Shopify-Shop-Domain") || "";
   const reqId = Math.random().toString(36).slice(2, 8);
 
   log("request", {
-    reqId,
-    shop: shopDomain,
+    reqId, shop: shopDomain,
     origin: req.body?.rate?.origin,
     destination: req.body?.rate?.destination,
     itemCount: req.body?.rate?.items?.length || 0,
@@ -40,47 +33,35 @@ router.post("/carrier-service", verifyShopifyHmac, checkDomain, async (req, res)
 
   try {
     const result = await getRatesForShopify(req.body, shopDomain);
-
-    log("backend-payload", { reqId, payload: result.payload });
-    log("backend-raw",     { reqId, raw: result.raw });
-    log("normalized",      { reqId, normalized: result.normalized });
-    log("shopify-rates",   { reqId, rates: result.rates });
-
-    if (result.error)       log("backend-error", { reqId, error: result.error });
-    if (result.note)        log("note",          { reqId, note: result.note });
+    log("backend-payload",   { reqId, payload: result.payload });
+    log("backend-raw",       { reqId, raw: result.raw });
+    log("normalized",        { reqId, normalized: result.normalized });
+    log("shopify-rates",     { reqId, rates: result.rates });
+    if (result.error) log("backend-error", { reqId, error: result.error });
+    if (result.note)  log("note",          { reqId, note: result.note });
     if (!result.rates.length) {
       log("EMPTY-RATES-RETURNED", {
         reqId,
-        why: result.note
-          || (result.error ? "backend error (see above)" : "backend returned nothing usable"),
+        why: result.note || (result.error ? "backend error (see above)" : "no usable rates"),
         hint: "Shopify will now show the store's manual fallback rates (often 'Free').",
       });
     }
-
     return res.status(200).json({ rates: result.rates });
   } catch (err) {
     log("fatal", { reqId, error: err?.message || String(err), stack: err?.stack });
-    // Never break checkout — return no rates rather than a 500.
     return res.status(200).json({ rates: [] });
   }
 });
 
-/**
- * Debug endpoint: returns the full picture (payload sent to backend, raw
- * backend response, normalized rates, mapped Shopify rates) so you can verify
- * everything without going through Shopify checkout.
- *
- * POST a Shopify-shaped { rate: {...} } body here, OR a simplified body like:
- *   { "origin": {...}, "destination": {...}, "items": [...] }
- */
+/** POST a Shopify-shaped { rate: {...} } body (or flat) to inspect the full pipeline. */
 router.post("/carrier-service/debug", async (req, res) => {
   const shopDomain = req.get("X-Shopify-Shop-Domain") || req.body.shop || "debug.myshopify.com";
-  // Allow flat body (no .rate wrapper) for convenience
   const body = req.body.rate ? req.body : { rate: req.body };
   const result = await getRatesForShopify(body, shopDomain);
   return res.status(200).json({
     ok: result.rates.length > 0,
     shop: shopDomain,
+    sentHeaders: nicnat.headersForLog(shopDomain),
     sentToBackend: result.payload,
     backendRawResponse: result.raw,
     backendError: result.error || null,
@@ -91,9 +72,7 @@ router.post("/carrier-service/debug", async (req, res) => {
 });
 
 /**
- * /diagnose — one-shot self-test you can hit from a browser. Uses a hardcoded
- * US→US cart to check that the backend is reachable and returning rates.
- * Use this FIRST whenever rates aren't showing.
+ * /diagnose — browser-friendly self-test. Uses a hardcoded US→US cart.
  */
 router.get("/diagnose", async (_req, res) => {
   const sample = {
@@ -101,34 +80,54 @@ router.get("/diagnose", async (_req, res) => {
       origin: { country: "US", postal_code: "10001", province: "NY" },
       destination: { country: "US", postal_code: "90210", province: "CA" },
       currency: "USD",
-      items: [
-        { name: "Diagnostic item", quantity: 1, grams: 500, product_id: 1, variant_id: 1 },
-      ],
+      items: [{ name: "Diagnostic item", quantity: 1, grams: 500, product_id: 1, variant_id: 1 }],
     },
   };
-  const result = await getRatesForShopify(sample, "diagnose.myshopify.com");
+  const shop = "diagnose.myshopify.com";
+  const result = await getRatesForShopify(sample, shop);
+  const sentHeaders = nicnat.headersForLog(shop);
 
   const checks = {
+    apiKeyConfigured: Boolean(config.nicnat.apiKey),
+    domainOverrideConfigured: Boolean(config.nicnat.domainOverride),
     backendReachable: result.raw !== null && result.error == null,
-    backendReturnedData: !!result.raw && (Array.isArray(result.raw) || Object.keys(result.raw || {}).length > 0),
+    backendReturnedData: !!result.raw && Object.keys(result.raw || {}).length > 0,
     backendHttpError: result.raw?.__httpError || null,
     ratesNormalized: (result.normalized || []).length,
     shopifyRatesCount: result.rates.length,
   };
 
-  const verdict = checks.shopifyRatesCount > 0
-    ? "OK — rates returned successfully"
-    : !checks.backendReachable
-      ? "FAIL — backend unreachable or threw. Check NICNAT_API_BASE and network."
-      : checks.backendHttpError
-        ? `FAIL — backend returned HTTP ${checks.backendHttpError}. Check auth / domain whitelist.`
-        : !checks.backendReturnedData
-          ? "FAIL — backend returned empty body. Likely wrong endpoint path."
-          : "FAIL — backend responded but no rates parsed. Inspect backendRawResponse shape.";
+  // Verdict + actionable next step
+  let verdict, nextStep;
+  if (checks.shopifyRatesCount > 0) {
+    verdict = "OK — rates returned successfully";
+    nextStep = "Delete the manual 'Nicnatdirect' / 'Standard' rates from Shopify Admin so only real rates show.";
+  } else if (!checks.backendReachable) {
+    verdict = "FAIL — backend unreachable or threw.";
+    nextStep = `Check NICNAT_API_BASE (currently ${config.nicnat.apiBase}) and network egress.`;
+  } else if (checks.backendHttpError === 401 || checks.backendHttpError === 403) {
+    verdict = `FAIL — backend returned HTTP ${checks.backendHttpError}. Auth failed.`;
+    nextStep = !checks.apiKeyConfigured
+      ? "Set NICNAT_API_KEY in your environment (Railway → Variables) to the API key your Laravel backend issued for your registered domain."
+      : !checks.domainOverrideConfigured
+        ? `API key IS set but backend still rejected it. The X-Nicnat-Domain header was '${sentHeaders["X-Nicnat-Domain"]}' — your backend may only accept a previously registered domain. Set NICNAT_DOMAIN_OVERRIDE to a registered domain (e.g. your old WC site URL).`
+        : "Both key and domain are set but still rejected. Verify the key matches the domain override on the Laravel side (or temporarily disable auth on the backend to confirm rates work).";
+  } else if (checks.backendHttpError) {
+    verdict = `FAIL — backend returned HTTP ${checks.backendHttpError}.`;
+    nextStep = "Inspect backendRawResponse below for the backend's error message.";
+  } else if (!checks.backendReturnedData) {
+    verdict = "FAIL — backend returned an empty body.";
+    nextStep = `Check NICNAT_RATES_ENDPOINT (currently '${config.nicnat.ratesEndpoint}') — likely wrong path.`;
+  } else {
+    verdict = "FAIL — backend responded but no rates parsed.";
+    nextStep = "Inspect backendRawResponse below. If the shape is new, extend normalizeRates() in src/services/rateService.js.";
+  }
 
   res.status(200).json({
     verdict,
+    nextStep,
     checks,
+    sentHeaders,
     sentToBackend: result.payload,
     backendRawResponse: result.raw,
     backendError: result.error || null,
