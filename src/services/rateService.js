@@ -205,36 +205,7 @@ export async function getRatesForShopify(shopifyReq, shopDomain = "") {
   try {
     raw = await nicnat.getShippingRates(payload, shopDomain);
   } catch (err) {
-
-    console.error("Nicnat API Error:", err);
-
-  // Fallback static rates
-  const fallbackRates = [
-    {
-      service_name: "Nicnat Economy",
-      service_code: "NICNAT_ECONOMY",
-      total_price: "1100", // $11.00
-      currency: "USD",
-      description: "Fallback rate",
-    },
-    {
-      service_name: "Nicnat Priority",
-      service_code: "NICNAT_PRIORITY",
-      total_price: "1600", // $16.00
-      currency: "USD",
-      description: "Fallback rate",
-    },
-  ];
-
-  return {
-    rates: fallbackRates,
-    payload,
-    raw: null,
-    fallback: true,
-    error: err.message || String(err),
-  };
-    
-    // return { rates: [], payload, raw: null, error: err.message || String(err) };
+    return { rates: [], payload, raw: null, error: err.message || String(err) };
   }
 
   const normalized = normalizeRates(raw, methods);
