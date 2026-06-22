@@ -79,16 +79,33 @@ function mapItem(item) {
 }
 
 /**
- * Build the payload sent to the Laravel backend. We include BOTH the keys the
- * WooCommerce plugin sent (methods/items/destination_*) and the keys the
- * ShippingRateService expects (packages/shipping_service_id/from_country_id…)
- * so the same request works regardless of which handler is wired up.
+ * Build the payload sent to the Laravel backend. Matches the schema enforced
+ * by `PluginAPIShippingRatesController::getRates()`:
+ *   - origin_country       (string, required)
+ *   - destination_country  (string, required)
+ *   - destination_state    (string, optional — looked up via StateModel.code)
+ *   - destination_postcode (string, optional)
+ *   - methods              (array of {id,key,label}, required)
+ *   - items                (array of {product_id,name,qty,weight,length,width,height}, required)
+ *
+ * This is byte-identical to the working Postman call.
  */
 function buildPayload(shopifyReq, shopDomain) {
   const rate = shopifyReq.rate || shopifyReq;
   const origin = rate.origin || {};
   const dest = rate.destination || {};
-  const items = (rate.items || []).map(mapItem);
+
+  // Strip the package_type_id / quantity helper fields that buildMethods needs
+  // internally — controller doesn't validate them but we don't need to send.
+  const items = (rate.items || []).map(mapItem).map((i) => ({
+    product_id: i.product_id,
+    name: i.name,
+    qty: i.qty,
+    weight: i.weight,
+    length: i.length,
+    width: i.width,
+    height: i.height,
+  }));
 
   const originCountry = (origin.country || config.nicnat.originCountry || "US").toUpperCase();
   const destCountry = (dest.country || "").toUpperCase();
@@ -100,29 +117,12 @@ function buildPayload(shopifyReq, shopDomain) {
     isDomestic,
     methods,
     payload: {
-      // ── WooCommerce-compatible keys ──────────────────────────────────────
-      domain_name: shopDomain || "",
       origin_country: originCountry,
       destination_country: destCountry,
       destination_state: dest.province || "",
       destination_postcode: dest.postal_code || "",
       methods,
       items,
-
-      // ── ShippingRateService-compatible keys ─────────────────────────────
-      shipping_service_id: config.nicnat.shippingServiceId,
-      from_country: originCountry,
-      to_country: destCountry,
-      to_state: dest.province || "",
-      to_postcode: dest.postal_code || "",
-      packages: items.map((i) => ({
-        package_type_id: i.package_type_id,
-        weight: i.weight,
-        length: i.length,
-        width: i.width,
-        height: i.height,
-        quantity: i.quantity,
-      })),
     },
   };
 }
@@ -196,30 +196,58 @@ function toShopifyRate(r) {
  * Never throws to the caller — on failure returns [] so checkout still works.
  */
 export async function getRatesForShopify(shopifyReq, shopDomain = "") {
-  const { payload, methods } = buildPayload(shopifyReq, shopDomain);
+  const { payload, methods, isDomestic } = buildPayload(shopifyReq, shopDomain);
 
-  if (!methods.length) return { rates: [], payload, raw: null, note: "no methods enabled" };
-  if (!payload.items.length) return { rates: [], payload, raw: null, note: "empty cart" };
+  if (!methods.length) return { rates: [], payload, raw: null, note: "no methods enabled", usedFallback: false };
+  if (!payload.items.length) return { rates: [], payload, raw: null, note: "empty cart", usedFallback: false };
 
-  let raw;
+  let raw, callError;
   try {
     raw = await nicnat.getShippingRates(payload, shopDomain);
   } catch (err) {
-    return { rates: [], payload, raw: null, error: err.message || String(err) };
+    callError = err.message || String(err);
+    raw = null;
   }
 
   const normalized = normalizeRates(raw, methods);
-  const rates = normalized.map(toShopifyRate);
+  let rates = normalized.map(toShopifyRate);
 
   // Surface why we returned no rates so logs and /diagnose are actionable.
   let note;
-  if (raw && raw.__httpError) {
+  if (callError) {
+    note = `backend threw: ${callError}`;
+  } else if (raw && raw.__httpError) {
     note = `backend HTTP ${raw.__httpError}` + (raw.error ? ` — ${raw.error}` : "");
   } else if (!normalized.length) {
     note = "backend response had no usable rates (check shape and prices > 0)";
   }
 
-  return { rates, payload, raw, normalized, note };
+  // ── Fallback / test mode ──────────────────────────────────────────────────
+  // If the real call gave us nothing AND NICNAT_USE_FALLBACK=true, return
+  // hardcoded test rates so you can verify the Shopify-rate flow works
+  // independently of the backend. Each returned rate is labelled "(TEST)" so
+  // it's obvious in checkout that this isn't a real price.
+  let usedFallback = false;
+  if (!rates.length && config.nicnat.useFallback) {
+    const filtered = config.nicnat.fallbackRates.filter((r) => {
+      if (r.key === "overnight" && !isDomestic) return false;
+      return true;
+    });
+    rates = filtered.map((r) => {
+      const shopifyRate = toShopifyRate({
+        key: r.key,
+        label: `${r.label} (TEST)`,
+        cost: round2(r.cost),
+      });
+      // Make the test nature visible in checkout too
+      shopifyRate.description = "TEST/FALLBACK rate — backend unreachable. NICNAT_USE_FALLBACK is on.";
+      return shopifyRate;
+    });
+    usedFallback = true;
+    note = (note ? note + " | " : "") + `FALLBACK ACTIVE: returned ${rates.length} test rate(s) instead`;
+  }
+
+  return { rates, payload, raw, normalized, note, usedFallback, error: callError || null };
 }
 
 export const __test = { buildMethods, mapItem, buildPayload, normalizeRates, toShopifyRate };

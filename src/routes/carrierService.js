@@ -39,6 +39,13 @@ router.post("/carrier-service", verifyShopifyHmac, checkDomain, async (req, res)
     log("shopify-rates",     { reqId, rates: result.rates });
     if (result.error) log("backend-error", { reqId, error: result.error });
     if (result.note)  log("note",          { reqId, note: result.note });
+    if (result.usedFallback) {
+      log("FALLBACK-RATES-USED", {
+        reqId,
+        reason: result.note,
+        hint: "NICNAT_USE_FALLBACK is ON. Real backend failed — returning hardcoded test rates labelled '(TEST)'. Turn this off in production.",
+      });
+    }
     if (!result.rates.length) {
       log("EMPTY-RATES-RETURNED", {
         reqId,
@@ -95,11 +102,16 @@ router.get("/diagnose", async (_req, res) => {
     backendHttpError: result.raw?.__httpError || null,
     ratesNormalized: (result.normalized || []).length,
     shopifyRatesCount: result.rates.length,
+    fallbackEnabled: config.nicnat.useFallback,
+    fallbackUsed: Boolean(result.usedFallback),
   };
 
   // Verdict + actionable next step
   let verdict, nextStep;
-  if (checks.shopifyRatesCount > 0) {
+  if (checks.fallbackUsed) {
+    verdict = "⚠️  TEST MODE — fallback rates returned because real backend failed.";
+    nextStep = `Backend reason: ${result.note}. The Shopify-side flow IS working (these test rates will show at checkout, labelled "(TEST)"). Fix the backend issue, then set NICNAT_USE_FALLBACK=false.`;
+  } else if (checks.shopifyRatesCount > 0) {
     verdict = "OK — rates returned successfully";
     nextStep = "Delete the manual 'Nicnatdirect' / 'Standard' rates from Shopify Admin so only real rates show.";
   } else if (!checks.backendReachable) {
@@ -109,9 +121,7 @@ router.get("/diagnose", async (_req, res) => {
     verdict = `FAIL — backend returned HTTP ${checks.backendHttpError}. Auth failed.`;
     nextStep = !checks.apiKeyConfigured
       ? "Set NICNAT_API_KEY in your environment (Railway → Variables) to the API key your Laravel backend issued for your registered domain."
-      : !checks.domainOverrideConfigured
-        ? `API key IS set but backend still rejected it. The X-Nicnat-Domain header was '${sentHeaders["X-Nicnat-Domain"]}' — your backend may only accept a previously registered domain. Set NICNAT_DOMAIN_OVERRIDE to a registered domain (e.g. your old WC site URL).`
-        : "Both key and domain are set but still rejected. Verify the key matches the domain override on the Laravel side (or temporarily disable auth on the backend to confirm rates work).";
+      : "API key is set but backend rejected it. Verify NICNAT_API_KEY matches a real plugin-user key (NOT the Laravel app's internal PLUGIN_API_KEY). The working Postman key is the one to use.";
   } else if (checks.backendHttpError) {
     verdict = `FAIL — backend returned HTTP ${checks.backendHttpError}.`;
     nextStep = "Inspect backendRawResponse below for the backend's error message.";
@@ -122,6 +132,9 @@ router.get("/diagnose", async (_req, res) => {
     verdict = "FAIL — backend responded but no rates parsed.";
     nextStep = "Inspect backendRawResponse below. If the shape is new, extend normalizeRates() in src/services/rateService.js.";
   }
+  if (checks.fallbackEnabled && !checks.fallbackUsed) {
+    nextStep += " (NICNAT_USE_FALLBACK is ON but wasn't needed — real rates came through.)";
+  }
 
   res.status(200).json({
     verdict,
@@ -131,6 +144,7 @@ router.get("/diagnose", async (_req, res) => {
     sentToBackend: result.payload,
     backendRawResponse: result.raw,
     backendError: result.error || null,
+    note: result.note || null,
     shopifyRates: result.rates,
   });
 });

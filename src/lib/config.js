@@ -50,6 +50,21 @@ export const config = {
       .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
     shippingServiceId: parseInt(process.env.NICNAT_SHIPPING_SERVICE_ID || "1", 10),
     originCountry: (process.env.NICNAT_ORIGIN_COUNTRY || "US").toUpperCase(),
+
+    // ── TEST/FALLBACK MODE ──────────────────────────────────────────────────
+    // When true: if the backend call fails (4xx, 5xx, timeout, network error,
+    // or returns no rates), we return the hardcoded `fallbackRates` below so
+    // you can verify the rate path Shopify ⇄ this app is working end-to-end.
+    // Switch OFF (false) in production so real failures aren't hidden.
+    useFallback: bool(process.env.NICNAT_USE_FALLBACK, false),
+
+    // The shape mirrors the real backend response exactly, so the same
+    // normalizeRates() handles it. Edit / extend here if you want different
+    // test values.
+    fallbackRates: [
+      { id: 1, label: "Nicnat Economy",  key: "economy",  cost: 79 },
+      { id: 2, label: "Nicnat Priority", key: "priority", cost: 89 },
+    ],
   },
 
   flags: {
