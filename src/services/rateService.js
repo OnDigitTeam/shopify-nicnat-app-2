@@ -79,33 +79,16 @@ function mapItem(item) {
 }
 
 /**
- * Build the payload sent to the Laravel backend. Matches the schema enforced
- * by `PluginAPIShippingRatesController::getRates()`:
- *   - origin_country       (string, required)
- *   - destination_country  (string, required)
- *   - destination_state    (string, optional — looked up via StateModel.code)
- *   - destination_postcode (string, optional)
- *   - methods              (array of {id,key,label}, required)
- *   - items                (array of {product_id,name,qty,weight,length,width,height}, required)
- *
- * This is byte-identical to the working Postman call.
+ * Build the payload sent to the Laravel backend. We include BOTH the keys the
+ * WooCommerce plugin sent (methods/items/destination_*) and the keys the
+ * ShippingRateService expects (packages/shipping_service_id/from_country_id…)
+ * so the same request works regardless of which handler is wired up.
  */
 function buildPayload(shopifyReq, shopDomain) {
   const rate = shopifyReq.rate || shopifyReq;
   const origin = rate.origin || {};
   const dest = rate.destination || {};
-
-  // Strip the package_type_id / quantity helper fields that buildMethods needs
-  // internally — controller doesn't validate them but we don't need to send.
-  const items = (rate.items || []).map(mapItem).map((i) => ({
-    product_id: i.product_id,
-    name: i.name,
-    qty: i.qty,
-    weight: i.weight,
-    length: i.length,
-    width: i.width,
-    height: i.height,
-  }));
+  const items = (rate.items || []).map(mapItem);
 
   const originCountry = (origin.country || config.nicnat.originCountry || "US").toUpperCase();
   const destCountry = (dest.country || "").toUpperCase();
@@ -117,12 +100,29 @@ function buildPayload(shopifyReq, shopDomain) {
     isDomestic,
     methods,
     payload: {
+      // ── WooCommerce-compatible keys ──────────────────────────────────────
+      domain_name: shopDomain || "",
       origin_country: originCountry,
       destination_country: destCountry,
       destination_state: dest.province || "",
       destination_postcode: dest.postal_code || "",
       methods,
       items,
+
+      // ── ShippingRateService-compatible keys ─────────────────────────────
+      shipping_service_id: config.nicnat.shippingServiceId,
+      from_country: originCountry,
+      to_country: destCountry,
+      to_state: dest.province || "",
+      to_postcode: dest.postal_code || "",
+      packages: items.map((i) => ({
+        package_type_id: i.package_type_id,
+        weight: i.weight,
+        length: i.length,
+        width: i.width,
+        height: i.height,
+        quantity: i.quantity,
+      })),
     },
   };
 }
@@ -205,36 +205,7 @@ export async function getRatesForShopify(shopifyReq, shopDomain = "") {
   try {
     raw = await nicnat.getShippingRates(payload, shopDomain);
   } catch (err) {
-
-    console.error("Nicnat API Error:", err);
-
-  // Fallback static rates
-  const fallbackRates = [
-    {
-      service_name: "Nicnat Economy",
-      service_code: "NICNAT_ECONOMY",
-      total_price: "1100", // $11.00
-      currency: "USD",
-      description: "Fallback rate",
-    },
-    {
-      service_name: "Nicnat Priority",
-      service_code: "NICNAT_PRIORITY",
-      total_price: "1600", // $16.00
-      currency: "USD",
-      description: "Fallback rate",
-    },
-  ];
-
-  return {
-    rates: fallbackRates,
-    payload,
-    raw: null,
-    fallback: true,
-    error: err.message || String(err),
-  };
-    
-    // return { rates: [], payload, raw: null, error: err.message || String(err) };
+    return { rates: [], payload, raw: null, error: err.message || String(err) };
   }
 
   const normalized = normalizeRates(raw, methods);
