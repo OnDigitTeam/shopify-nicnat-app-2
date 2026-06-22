@@ -12,7 +12,7 @@ function bool(v, def = false) {
   return String(v).toLowerCase() === "true" || v === "1";
 }
 
-const base = (process.env.NICNAT_API_BASE || "https://nicnat.ondigit.us/api/v1/").trim();
+const base = (process.env.NICNAT_API_BASE || "https://nicnatdirect.com/api/v1/").trim();
 
 export const config = {
   port: parseInt(process.env.PORT || "3000", 10),

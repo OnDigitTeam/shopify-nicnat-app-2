@@ -79,16 +79,33 @@ function mapItem(item) {
 }
 
 /**
- * Build the payload sent to the Laravel backend. We include BOTH the keys the
- * WooCommerce plugin sent (methods/items/destination_*) and the keys the
- * ShippingRateService expects (packages/shipping_service_id/from_country_id…)
- * so the same request works regardless of which handler is wired up.
+ * Build the payload sent to the Laravel backend. Matches the schema enforced
+ * by `PluginAPIShippingRatesController::getRates()`:
+ *   - origin_country       (string, required)
+ *   - destination_country  (string, required)
+ *   - destination_state    (string, optional — looked up via StateModel.code)
+ *   - destination_postcode (string, optional)
+ *   - methods              (array of {id,key,label}, required)
+ *   - items                (array of {product_id,name,qty,weight,length,width,height}, required)
+ *
+ * This is byte-identical to the working Postman call.
  */
 function buildPayload(shopifyReq, shopDomain) {
   const rate = shopifyReq.rate || shopifyReq;
   const origin = rate.origin || {};
   const dest = rate.destination || {};
-  const items = (rate.items || []).map(mapItem);
+
+  // Strip the package_type_id / quantity helper fields that buildMethods needs
+  // internally — controller doesn't validate them but we don't need to send.
+  const items = (rate.items || []).map(mapItem).map((i) => ({
+    product_id: i.product_id,
+    name: i.name,
+    qty: i.qty,
+    weight: i.weight,
+    length: i.length,
+    width: i.width,
+    height: i.height,
+  }));
 
   const originCountry = (origin.country || config.nicnat.originCountry || "US").toUpperCase();
   const destCountry = (dest.country || "").toUpperCase();
@@ -100,29 +117,12 @@ function buildPayload(shopifyReq, shopDomain) {
     isDomestic,
     methods,
     payload: {
-      // ── WooCommerce-compatible keys ──────────────────────────────────────
-      domain_name: shopDomain || "",
       origin_country: originCountry,
       destination_country: destCountry,
       destination_state: dest.province || "",
       destination_postcode: dest.postal_code || "",
       methods,
       items,
-
-      // ── ShippingRateService-compatible keys ─────────────────────────────
-      shipping_service_id: config.nicnat.shippingServiceId,
-      from_country: originCountry,
-      to_country: destCountry,
-      to_state: dest.province || "",
-      to_postcode: dest.postal_code || "",
-      packages: items.map((i) => ({
-        package_type_id: i.package_type_id,
-        weight: i.weight,
-        length: i.length,
-        width: i.width,
-        height: i.height,
-        quantity: i.quantity,
-      })),
     },
   };
 }

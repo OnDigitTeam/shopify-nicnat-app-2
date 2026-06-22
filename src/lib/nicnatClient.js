@@ -51,18 +51,14 @@ class NicnatClient {
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     const headers = this.headers(shopDomain);
 
-    // Make sure the payload's body-level identity also matches the spoofed
-    // domain — the WC plugin set domain_name = site_url() in the body too.
-    const finalPayload = {
-      ...payload,
-      domain_name: headers["X-Nicnat-Domain"] || payload.domain_name || "",
-    };
-
+    // Send body exactly as the caller built it. domain_name is NOT injected:
+    // the controller doesn't validate or use it, and identity travels in the
+    // X-Nicnat-Domain header (which matches the working Postman call).
     try {
       const res = await fetch(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(finalPayload),
+        body: JSON.stringify(payload),
         signal: ctrl.signal,
       });
 
