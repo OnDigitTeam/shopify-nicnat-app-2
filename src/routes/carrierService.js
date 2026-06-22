@@ -20,46 +20,59 @@ function log(stage, obj) {
  * the store's manually-configured rates (this is where "Free" rows come from
  * — they're in Shopify Admin → Settings → Shipping and delivery, NOT this app).
  */
-router.post("/carrier-service", verifyShopifyHmac, checkDomain, async (req, res) => {
-  const shopDomain = req.shopDomain || req.get("X-Shopify-Shop-Domain") || "";
-  const reqId = Math.random().toString(36).slice(2, 8);
+// router.post("/carrier-service", verifyShopifyHmac, checkDomain, async (req, res) => {
+//   const shopDomain = req.shopDomain || req.get("X-Shopify-Shop-Domain") || "";
+//   const reqId = Math.random().toString(36).slice(2, 8);
 
-  log("request", {
-    reqId, shop: shopDomain,
-    origin: req.body?.rate?.origin,
-    destination: req.body?.rate?.destination,
-    itemCount: req.body?.rate?.items?.length || 0,
+//   log("request", {
+//     reqId, shop: shopDomain,
+//     origin: req.body?.rate?.origin,
+//     destination: req.body?.rate?.destination,
+//     itemCount: req.body?.rate?.items?.length || 0,
+//   });
+
+//   try {
+//     const result = await getRatesForShopify(req.body, shopDomain);
+//     log("backend-payload",   { reqId, payload: result.payload });
+//     log("backend-raw",       { reqId, raw: result.raw });
+//     log("normalized",        { reqId, normalized: result.normalized });
+//     log("shopify-rates",     { reqId, rates: result.rates });
+//     if (result.error) log("backend-error", { reqId, error: result.error });
+//     if (result.note)  log("note",          { reqId, note: result.note });
+//     if (result.usedFallback) {
+//       log("FALLBACK-RATES-USED", {
+//         reqId,
+//         reason: result.note,
+//         hint: "NICNAT_USE_FALLBACK is ON. Real backend failed — returning hardcoded test rates labelled '(TEST)'. Turn this off in production.",
+//       });
+//     }
+//     if (!result.rates.length) {
+//       log("EMPTY-RATES-RETURNED", {
+//         reqId,
+//         why: result.note || (result.error ? "backend error (see above)" : "no usable rates"),
+//         hint: "Shopify will now show the store's manual fallback rates (often 'Free').",
+//       });
+//     }
+//     return res.status(200).json({ rates: result.rates });
+//   } catch (err) {
+//     log("fatal", { reqId, error: err?.message || String(err), stack: err?.stack });
+//     return res.status(200).json({ rates: [] });
+//   }
+// });
+router.post("/carrier-service", async (req, res) => {
+  console.log("SHOPIFY CALLED");
+
+  return res.json({
+    rates: [
+      {
+        service_name: "TEST SHIPPING",
+        service_code: "TEST_SHIPPING",
+        total_price: "100",
+        currency: "USD"
+      }
+    ]
   });
-
-  try {
-    const result = await getRatesForShopify(req.body, shopDomain);
-    log("backend-payload",   { reqId, payload: result.payload });
-    log("backend-raw",       { reqId, raw: result.raw });
-    log("normalized",        { reqId, normalized: result.normalized });
-    log("shopify-rates",     { reqId, rates: result.rates });
-    if (result.error) log("backend-error", { reqId, error: result.error });
-    if (result.note)  log("note",          { reqId, note: result.note });
-    if (result.usedFallback) {
-      log("FALLBACK-RATES-USED", {
-        reqId,
-        reason: result.note,
-        hint: "NICNAT_USE_FALLBACK is ON. Real backend failed — returning hardcoded test rates labelled '(TEST)'. Turn this off in production.",
-      });
-    }
-    if (!result.rates.length) {
-      log("EMPTY-RATES-RETURNED", {
-        reqId,
-        why: result.note || (result.error ? "backend error (see above)" : "no usable rates"),
-        hint: "Shopify will now show the store's manual fallback rates (often 'Free').",
-      });
-    }
-    return res.status(200).json({ rates: result.rates });
-  } catch (err) {
-    log("fatal", { reqId, error: err?.message || String(err), stack: err?.stack });
-    return res.status(200).json({ rates: [] });
-  }
 });
-
 /** POST a Shopify-shaped { rate: {...} } body (or flat) to inspect the full pipeline. */
 router.post("/carrier-service/debug", async (req, res) => {
   const shopDomain = req.get("X-Shopify-Shop-Domain") || req.body.shop || "debug.myshopify.com";
