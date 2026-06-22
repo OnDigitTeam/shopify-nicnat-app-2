@@ -1,7 +1,7 @@
 {
   "name": "nicnat-shopify-shipping",
   "version": "1.0.0",
-  "description": "NicnatDirect Shopify shipping app — exposes real-time rates from the Laravel rate API via Shopify CarrierService.",
+  "description": "Minimal Shopify shipping app — always returns two static Nicnat rates.",
   "type": "module",
   "main": "src/server.js",
   "scripts": {
@@ -12,8 +12,6 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@shopify/shopify-api": "^11.6.0",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2"
   }
 }
