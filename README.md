@@ -131,3 +131,117 @@ src/
 - To go to production: finish OAuth (store offline tokens per shop), set
   `AUTH_DISABLED=false` and `DOMAIN_CHECK_DISABLED=false`, and look the shop up in
   your DB inside `checkDomain`.
+
+---
+
+## Debugging "Free" rates / no rates showing
+
+When Shopify shows "Free" or your manual fallback rate instead of Nicnat rates,
+it almost always means the carrier-service callback returned `{rates: []}`. There
+are four common reasons. Use these tools in order.
+
+### Step 1 — Hit `/diagnose` first
+
+Open this in a browser (no body needed, it sends a hardcoded US→US cart):
+
+```
+https://YOUR-DOMAIN.up.railway.app/diagnose
+```
+
+You'll get back a `verdict` plus `checks`, `sentToBackend`, `backendRawResponse`,
+and `shopifyRates`. The verdict tells you exactly which layer is broken:
+
+| Verdict | Meaning | Fix |
+|---|---|---|
+| OK — rates returned | App + backend both work | Issue is store-specific (see Step 4) |
+| FAIL — backend unreachable | Can't reach Laravel | Check `NICNAT_API_BASE`, network egress, DNS |
+| FAIL — backend HTTP 4xx/5xx | Backend rejected the call | Check auth headers, domain whitelist, payload shape |
+| FAIL — backend returned empty body | Wrong endpoint path | Check `NICNAT_RATES_ENDPOINT` |
+| FAIL — no rates parsed | Backend returned a shape we don't understand, or all prices were 0/null | Inspect `backendRawResponse` in the JSON |
+
+### Step 2 — Hit `/carrier-service/debug` with the real cart
+
+Reproduce your actual checkout (e.g. India destination from your screenshot):
+
+```bash
+curl -X POST https://YOUR-DOMAIN.up.railway.app/carrier-service/debug \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "rate": {
+      "origin": { "country": "US", "postal_code": "10001", "province": "NY" },
+      "destination": { "country": "IN", "postal_code": "411001", "province": "MH" },
+      "currency": "USD",
+      "items": [{ "name":"Tee","quantity":1,"grams":500,"product_id":1,"variant_id":1 }]
+    }
+  }'
+```
+
+Returns: `sentToBackend`, `backendRawResponse`, `backendError`, `note`,
+`normalized`, `shopifyRates`. If `shopifyRates: []` but `backendRawResponse`
+has data, the response shape isn't one we recognise — paste it and we'll
+extend `normalizeRates()` in `src/services/rateService.js`.
+
+### Step 3 — Check live logs
+
+Railway: Deployments → View Logs (or `railway logs --tail`).
+Every checkout request logs (with a short `reqId` so you can follow one
+request through):
+
+```
+[carrier-service][request]       {"reqId":"a1b2c3","shop":"...","destination":{...}}
+[carrier-service][backend-payload] {"reqId":"a1b2c3","payload":{...}}
+[carrier-service][backend-raw]   {"reqId":"a1b2c3","raw":{...}}
+[carrier-service][normalized]    {"reqId":"a1b2c3","normalized":[...]}
+[carrier-service][shopify-rates] {"reqId":"a1b2c3","rates":[...]}
+[carrier-service][EMPTY-RATES-RETURNED] {"reqId":"a1b2c3","why":"...","hint":"..."}
+```
+
+If you don't see ANY `[carrier-service]` lines when you reach checkout,
+Shopify isn't calling your app at all — the carrier service isn't registered
+for that shop. Re-run `POST /admin/register-carrier`.
+
+### Step 4 — Common causes & fixes
+
+**A. Carrier service not registered with the shop.**
+No `[carrier-service][request]` log lines on checkout → Shopify never called you.
+Re-register:
+```bash
+curl -X POST https://YOUR-DOMAIN.up.railway.app/admin/register-carrier \
+  -H 'Content-Type: application/json' \
+  -d '{"shop":"your-store.myshopify.com","accessToken":"shpat_xxx"}'
+```
+
+**B. Destination country has no rates in the backend.**
+This is what your "India" screenshot looks like. The WC plugin and Laravel
+service were US-store-origin oriented. Confirm with `/carrier-service/debug`
+using the same destination — if `backendRawResponse` is empty/has an error,
+the backend has no rates for that country. Either add them server-side or
+limit the destinations your store sells to.
+
+**C. Backend HTTP error (auth, missing headers).**
+`/diagnose` shows `backendHttpError: 401/403/422`. Inspect what
+`X-Nicnat-Key` / `X-Nicnat-Domain` your backend expects, set `NICNAT_API_KEY`
+in env, and flip `AUTH_DISABLED=false` once you have it working.
+
+**D. The "Free" rows are manual store rates, not from your app.**
+Shopify Admin → **Settings → Shipping and delivery** → check each shipping
+profile/zone. If you see manually-created rates called "Nicnatdirect" or
+"Standard" priced at $0, delete or hide them — they're confusing the picture.
+After you delete them and the app returns `[]`, the customer will simply see
+"No shipping rates available" (which is the honest state when the backend
+has no rates).
+
+**E. All backend prices were 0 or null.**
+`normalizeRates()` filters those out (matches the WC plugin behaviour).
+Check `backendRawResponse` — if `cost: 0` or `price: null`, the issue is in
+the rate calculation server-side (likely no zone/rate row for that
+package/destination), not in this app.
+
+### When to ask for help
+
+Capture and share:
+1. Full output of `GET /diagnose`
+2. Full output of `POST /carrier-service/debug` with your failing cart
+3. The relevant `[carrier-service][...]` log lines (find them by `reqId`)
+
+That's enough to pinpoint any remaining issue.
